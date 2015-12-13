@@ -1,4 +1,5 @@
 <?PHP
+//NABOORVERSION=1.02
 define('PIDFILE', '/dev/shm/upload/parsejson.pid');
 $filesSrc = array(1090=>"/dev/shm/1090data/aircraft.json", 978=>"/dev/shm/978data/aircraft.json");
 
@@ -60,9 +61,11 @@ while (true){
 				}
 			}
 		}
+		if (count($json->aircraft)>0)
+			file_put_contents("$filename.$now",$file);
 	}
 	file_put_contents("/dev/shm/upload/adsb.txt",$output,FILE_APPEND);
-	sleep(3);
+	sleep(5);
 }
 
 ?>

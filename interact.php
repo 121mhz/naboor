@@ -1,4 +1,5 @@
 <?PHP
+	//NABOORVERSION=0.322
 	$configFile = "/etc/naboor.cfg";
 	$config =""; //leave blank, we fill in later
 function make_thumb($src, $dest, $desired_width) {
@@ -7,16 +8,12 @@ function make_thumb($src, $dest, $desired_width) {
 	$source_image = imagecreatefromjpeg($src);
 	$width = imagesx($source_image);
 	$height = imagesy($source_image);
-	
 	/* find the "desired height" of this thumbnail, relative to the desired width  */
 	$desired_height = floor($height * ($desired_width / $width));
-	
 	/* create a new, "virtual" image */
 	$virtual_image = imagecreatetruecolor($desired_width, $desired_height);
-	
 	/* copy source image at a resized size */
 	imagecopyresampled($virtual_image, $source_image, 0, 0, 0, 0, $desired_width, $desired_height, $width, $height);
-	
 	/* create the physical thumbnail image to its destination */
 	imagejpeg($virtual_image, $dest);
 }
@@ -137,6 +134,16 @@ function checkRelaySchedule(){
 		logMessage("Completed turn OFF of RSID $RSID: SQL result $log");
 	}
 }
+function killprocess($processName){
+	global $config;
+	logMessage("Killing $processName");
+	exec("pgrep $processName", $pids);
+	foreach($pids as $pid){
+		logMessage("Sending process $pid SIGTERM");
+		$result = posix_kill($pid,SIGTERM);
+		logMessage("Result of SIGTERM on $pid is: $result");
+	}
+}
 
 function check1090Running(){
 	global $config;
@@ -146,10 +153,13 @@ function check1090Running(){
 		if(empty($pids)) {
 			logMessage("dump1090 isn't running, we will start it");
 			$str="";
-			if($config->adsbFreq0=="1090")
+			if($config->adsbFreq0=="1090"){
 				$str = str_replace("<DEVINDEX>",0,$config->adsb1090String);
-			elseif($config->adsbFreq1=="1090")
+			}
+			elseif($config->adsbFreq1=="1090"){
 				$str = str_replace("<DEVINDEX>",1,$config->adsb1090String);
+			}
+			$str = str_replace("<TIME>",time(),$str);
 			if ($str!=""){
 				$pidfile="/dev/shm/1090data/dump1090.pid";
 				exec(sprintf("%s > %s 2>&1 & echo $! >> %s", $str, "/dev/null", $pidfile));
@@ -189,7 +199,6 @@ function check1090Running(){
 					exec(sprintf("%s > %s 2>&1 & echo $! >> %s", $str, "/dev/null", $pidfile));
 				}
 			}
-			
 		}
 		checkParseJsonRunning();
 	}
@@ -218,6 +227,8 @@ function checkMotionRunning(){
 			$str="motion";
 			exec(sprintf("%s > %s 2>&1 & echo $! >> %s", $str, "/dev/null", $pidfile));
 		}
+		else
+			logMessage("Motion is running on PID: ".$pids[0]);
 	}
 }
 function isRunning($pid){
@@ -268,6 +279,7 @@ function check978Running(){
                     $str = str_replace("<DEVINDEX>",0,$config->adsb978String);
             elseif($config->adsbFreq1=="978")
                     $str = str_replace("<DEVINDEX>",1,$config->adsb978String);
+			$str = str_replace("<TIME>",time(),$str);
             if ($str!=""){
 				$pidfile="/dev/shm/978data/dump978.pid";
     			exec(sprintf("%s > %s 2>&1 & echo $! >> %s", $str, "/dev/null", $pidfile));
@@ -460,6 +472,81 @@ function resetFlags(){
     curl_close ($ch);
 	logMessage("Resetting complete, result is ".$result);
 }
+function changeSettings(){
+	global $config;
+	logMessage("Starting to check settings");
+	$post = array('action' => 'getSettings', 'PID' => $config->PID);
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $config->serverurl);
+    curl_setopt($ch, CURLOPT_POST,1);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $post);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER,1);
+    $result=curl_exec($ch);
+    curl_close ($ch);
+	$output = gzdecode($result);
+	if (!$output)
+		logMessage("Output not GZ format: $output; $result");
+	$jsonout = json_decode($output);
+	logMessage("Settings read from server are: $output");
+	$time=time();
+	foreach($jsonout as $value){
+		$filename=$value->FileName;
+		rename($filename,$filename.$time);
+		file_put_contents($filename,$value->Value);
+	}
+	$config = readConfiguration();
+	killprocess('motion');
+	killprocess('rtl_sdr');
+	killprocess('dump1090');
+	check978Running();
+	check1090Running();
+	checkMotionRunning();
+}
+function checkFileVersion($filename){
+	logMessage("Determining version of file: $filename");
+	$file = file_get_contents($filename);
+	$parts = explode("\n",$file);
+	for ($i=0; $i<count($parts); $i++){
+		if (strstr($parts[$i],"NABOORVERSION")!=false){
+			$split = explode("=",$parts[$i]);
+			if (count($split)>=2){
+				$version = $split[1];
+				logMessage("$filename is version $version");
+				return $version;
+			}
+		}
+	}
+	logMessage("Searched the whole file and found not NABOORVERSION line");
+	return 0;
+}
+function loadNewFile($filename){
+	global $config;
+	logMessage("Getting new version of File $filename");
+    $post = array('action' => 'getSoftware', 'PID' => $config->PID, 'Filename'=>$filename);
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $config->serverurl);
+    curl_setopt($ch, CURLOPT_POST,1);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $post);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER,1);
+    $result=curl_exec($ch);
+    curl_close ($ch);
+    $output = gzdecode($result);
+    if (!$output){
+    	logMessage("ERROR: response not in GZIP format: ".$result);
+    	return false;
+    }
+    $size = strlen($output);
+ 	$result = file_put_contents("/dev/shm/tempFile",$output);
+ 	$newVersion = checkFileVersion("/dev/shm/tempFile");
+	logMessage("Got result of size $size with version $newVersion");
+	if ($newVersion>0){
+		$result = rename("/dev/shm/tempFile",$filename);
+		logMessage("Result of file copy is $result");
+		return true;
+	}
+	return false;
+	
+}
 function checkFlags(){
 	global $config;
 	logMessage("Checking remote Flags");
@@ -482,10 +569,9 @@ function checkFlags(){
 		curl_close($ch);
 		sleep(3); // just a little delay to take the pic
 		uploadNewPics();
-		
 	}
 	if ($jsonout->changeSettings==1){
-		
+		changeSettings();
 	}
 	if (count($jsonout->needPics)>0){
 		foreach($jsonout->needPics as $PicID){
@@ -494,9 +580,38 @@ function checkFlags(){
 	}
 	if ($jsonout->takePic || $jsonout->changeSettings || $jsonout->forceReboot)
 		resetFlags();
-	if ($jsonout->forceReboot==1){
-		
+	
+	foreach ($jsonout->Files as $filename=>$version){
+		if (checkFileVersion($filename)<$version){
+			loadNewFile($filename);
+			if (basename($filename)=='interact.php'){
+				$str="/usr/bin/php $filename";
+				$pidfile="/dev/shm/naboor.pid";
+				exec(sprintf("%s > %s 2>&1 & echo $! >> %s", $str, "/dev/null", $pidfile));
+				die(); 
+			}
+			elseif (basename($filename)=='parsejson.php'){
+				if (is_file("/dev/shm/upload/parsejson.pid")){
+					$pid = file_get_contents("/dev/shm/upload/parsejson.pid");
+					exec("kill $pid");
+					checkParseJsonRunning();
+				}
+			}
+		}
 	}
+	if (property_exists($jsonout,"command")){
+		//TODO:execute command and upload results to server
+	}
+	if (property_exists($jsonout,"mayday") && $jsonout->mayday==1){
+		//TODO:open SSH session
+	}
+	if ($jsonout->forceReboot==1){
+		//TODO:Dan, add some code here
+		$str="shutdown -h now";
+		exec(sprintf("%s > %s 2>&1 & echo $! >> %s", $str, "/dev/null", $pidfile));
+		die(); //should never get here
+	}
+	
 
 }
 function checkImmediatePic(){
@@ -606,6 +721,7 @@ while (true){
 	logMessage("Configuration has been read: ".json_encode($config));
 	check978Running();
 	check1090Running();
+	checkMotionRunning();
 	while (!checkConnect()){
 		logMessage("No network Connection detected, connecting");
 		if (!connect())
